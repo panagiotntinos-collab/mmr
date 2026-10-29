@@ -73,8 +73,11 @@ async function detectCaptchaOrBlocking(page, pageName = 'page') {
     console.log(`  → Checking for CAPTCHA/blocking on ${pageName}...`);
 
     const result = await page.evaluate(() => {
-        const bodyText = (document.body?.textContent || '');
-        const text = bodyText.toLowerCase();
+        // innerText = VISIBLE text only. textContent also includes inline <script> bodies, so
+        // site JS like Gravity Forms' `gforms_recaptcha_recaptcha_strings` matched "captcha".
+        const bodyText = (document.body?.innerText || '');
+        // Strip the passive "protected by reCAPTCHA" notice so it can't trip the keyword check.
+        const text = bodyText.toLowerCase().replace(/protected by recaptcha/g, '');
         const html = document.documentElement.innerHTML.toLowerCase();
 
         // Keyword groups — each match records WHICH keyword hit and the surrounding text,
@@ -103,11 +106,19 @@ async function detectCaptchaOrBlocking(page, pageName = 'page') {
         }
 
         // Distinguish an INTERACTIVE reCAPTCHA challenge from the passive footer badge/script
-        // that normal login pages carry ("This site is protected by reCAPTCHA...").
-        const recaptchaWidget = !!document.querySelector(
-            '.g-recaptcha, [data-sitekey], iframe[src*="recaptcha/api2/anchor"], iframe[src*="recaptcha/api2/bframe"], iframe[src*="recaptcha/enterprise"]'
-        );
-        signals.hasRecaptcha = recaptchaWidget || html.includes('recaptcha');
+        // that normal pages carry. Invisible/v3 reCAPTCHA (size=invisible anchor + a hidden,
+        // off-screen bframe) is present on ordinary pages (e.g. the www.manheim.com contact form)
+        // and is NOT a challenge — only a VISIBLE checkbox or an opened image challenge counts.
+        const isShown = (el) => {
+            const r = el.getBoundingClientRect();
+            const s = getComputedStyle(el);
+            return r.width > 10 && r.height > 10 && r.bottom > 0 && r.right > 0
+                && s.visibility !== 'hidden' && s.display !== 'none' && parseFloat(s.opacity || '1') > 0.1;
+        };
+        const recaptchaWidget = Array.from(document.querySelectorAll(
+            'iframe[src*="recaptcha/api2/anchor"], iframe[src*="recaptcha/enterprise/anchor"], iframe[src*="recaptcha/api2/bframe"], iframe[src*="recaptcha/enterprise/bframe"]'
+        )).some(f => !/[?&]size=invisible/.test(f.src) && isShown(f));
+        signals.hasRecaptcha = recaptchaWidget;
         const recaptchaBadgeOnly = html.includes('recaptcha') && !recaptchaWidget;
 
         // Structural / positive signals — much more reliable than keyword guessing.
@@ -128,7 +139,7 @@ async function detectCaptchaOrBlocking(page, pageName = 'page') {
     if (result.recaptchaWidget) {
         console.log('  ⚠️ INTERACTIVE reCAPTCHA widget present (real challenge)');
     } else if (result.recaptchaBadgeOnly) {
-        console.log('  ℹ️ Passive reCAPTCHA badge/script only — normal on login pages, NOT a challenge');
+        console.log('  ℹ️ Passive/invisible reCAPTCHA only — normal on many pages, NOT a challenge');
     }
     if (result.hasPasswordField) {
         console.log('  ℹ️ Password field present → this looks like a LOGIN page, not a captcha');
